@@ -17,8 +17,9 @@ jobs:
       - name: Download and unpack 3GPP specifications
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
           mkdir -p out work
+          : > out/failures.tsv
           ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'
           while IFS=$'\t' read -r url output; do
             [ -z "${url:-}" ] && continue
@@ -27,13 +28,23 @@ jobs:
             mkdir -p work/unpack
             base="${url%/*}/"
             curl -fsSL -A "$ua" -c work/cookies.txt "$base" -o /dev/null || true
-            curl -fL --retry 5 --retry-delay 2 -A "$ua" -e "$base" -b work/cookies.txt -H 'Accept: application/zip,application/octet-stream;q=0.9,*/*;q=0.8' "$url" -o work/spec.zip
-            unzip -q work/spec.zip -d work/unpack
+            if ! curl -fL --retry 3 --retry-delay 2 -A "$ua" -e "$base" -b work/cookies.txt -H 'Accept: application/zip,application/octet-stream;q=0.9,*/*;q=0.8' "$url" -o work/spec.zip; then
+              printf '%s\t%s\tdownload_failed\n' "$url" "$output" >> out/failures.tsv
+              continue
+            fi
+            if ! unzip -q work/spec.zip -d work/unpack; then
+              printf '%s\t%s\tunzip_failed\n' "$url" "$output" >> out/failures.tsv
+              continue
+            fi
             src="$(find work/unpack -type f \( -iname '*.docx' -o -iname '*.doc' \) | head -n 1)"
-            test -n "$src"
+            if [ -z "$src" ]; then
+              printf '%s\t%s\tno_doc_found\n' "$url" "$output" >> out/failures.tsv
+              continue
+            fi
             ext="${src##*.}"
             cp "$src" "out/${output}.${ext}"
           done < mcx-fetch/manifest.tsv
+          echo 'Fetched files:'
           ls -lh out
       - name: Upload fetched specifications
         uses: actions/upload-artifact@v4
