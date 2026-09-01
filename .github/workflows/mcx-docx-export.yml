@@ -64,5 +64,6 @@ jobs:
           name: ${{ steps.fetch.outputs.artifact_name }}
           path: package/**
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 1
           compression-level: 6
