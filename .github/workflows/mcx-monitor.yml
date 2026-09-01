@@ -3,8 +3,6 @@ name: MCX Monitor Bridge
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'mcx-monitor/specs.tsv'
 
 permissions:
   contents: read
@@ -20,6 +18,7 @@ jobs:
           set -u
           mkdir -p out work
           : > out/archive.tsv
+          : > out/latest-drafts.tsv
           : > out/failures.tsv
           ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'
           while IFS=$'\t' read -r spec archive; do
@@ -27,61 +26,38 @@ jobs:
             rm -rf work/*
             mkdir -p work
             curl -fsSL -A "$ua" -c work/cookies.txt "$archive" -o /dev/null || true
-            if ! curl -fsSL -A "$ua" -e "$archive" -b work/cookies.txt "$archive" -o work/page.html; then
+            if curl -fsSL -A "$ua" -e "$archive" -b work/cookies.txt "$archive" -o work/page.html; then
+              grep -Eoi 'href=["'"'"'][^"'"'"']+\.zip([^"'"'"']*)?["'"'"']' work/page.html | sed -E 's/^href=["'"'"']//I; s/["'"'"']$//' | sort -u | while read -r href; do
+                name="${href%%\?*}"; name="${name##*/}"
+                printf '%s\t%s\t%s\t%s\n' "$spec" "$name" "$href" "$archive" >> out/archive.tsv
+              done
+            else
               printf '%s\t%s\tarchive_list_failed\n' "$spec" "$archive" >> out/failures.tsv
-              continue
             fi
-            python - "$spec" "$archive" work/page.html >> out/archive.tsv <<'PY'
-import html, re, sys
-from pathlib import Path
-spec, base, path = sys.argv[1:]
-s = Path(path).read_text(errors='ignore')
-links = []
-for m in re.finditer(r'href=["\']([^"\']+\.zip(?:\?[^"\']*)?)["\']', s, re.I):
-    href = html.unescape(m.group(1))
-    name = href.split('?')[0].rstrip('/').split('/')[-1]
-    links.append((name, href))
-for name, href in sorted(set(links)):
-    print(f"{spec}\t{name}\t{href}\t{base}")
-PY
           done < mcx-monitor/specs.tsv
-
+          latest='https://www.3gpp.org/ftp/Specs/latest-drafts/'
           rm -rf work/*
           mkdir -p work
-          latest='https://www.3gpp.org/ftp/Specs/latest-drafts/'
           curl -fsSL -A "$ua" -c work/cookies.txt "$latest" -o /dev/null || true
           if curl -fsSL -A "$ua" -e "$latest" -b work/cookies.txt "$latest" -o work/latest.html; then
-            python - work/latest.html mcx-monitor/specs.tsv > out/latest-drafts.tsv <<'PY'
-import html, re, sys
-from pathlib import Path
-s = Path(sys.argv[1]).read_text(errors='ignore')
-specs = []
-for line in Path(sys.argv[2]).read_text().splitlines():
-    if not line.strip(): continue
-    spec = line.split('\t',1)[0]
-    specs.append(spec)
-links=[]
-for m in re.finditer(r'href=["\']([^"\']+\.zip(?:\?[^"\']*)?)["\']', s, re.I):
-    href=html.unescape(m.group(1))
-    name=href.split('?')[0].rstrip('/').split('/')[-1]
-    links.append((name,href))
-def prefixes(spec):
-    compact=spec.replace('.','')
-    return {compact, compact.replace('-',''), compact.replace('-', '-')}
-for spec in specs:
-    ps=prefixes(spec)
-    for name,href in sorted(set(links)):
-        low=name.lower()
-        if any(low.startswith(p.lower()) for p in ps):
-            print(f"{spec}\t{name}\t{href}")
-PY
+            grep -Eoi 'href=["'"'"'][^"'"'"']+\.zip([^"'"'"']*)?["'"'"']' work/latest.html | sed -E 's/^href=["'"'"']//I; s/["'"'"']$//' | sort -u > work/latest-links.txt || true
+            while IFS=$'\t' read -r spec archive; do
+              [ -z "${spec:-}" ] && continue
+              prefix="${spec/./}"
+              while read -r href; do
+                name="${href%%\?*}"; name="${name##*/}"
+                case "${name,,}" in
+                  "${prefix,,}"*) printf '%s\t%s\t%s\n' "$spec" "$name" "$href" >> out/latest-drafts.tsv ;;
+                esac
+              done < work/latest-links.txt
+            done < mcx-monitor/specs.tsv
           else
             printf '%s\t%s\tlatest_drafts_list_failed\n' '-' "$latest" >> out/failures.tsv
-            : > out/latest-drafts.tsv
           fi
-          echo 'Archive rows:'; wc -l out/archive.tsv
-          echo 'Latest draft matches:'; wc -l out/latest-drafts.tsv
-          echo 'Failures:'; cat out/failures.tsv || true
+          echo "archive_rows=$(wc -l < out/archive.tsv)"
+          echo "latest_rows=$(wc -l < out/latest-drafts.tsv)"
+          echo "failure_rows=$(wc -l < out/failures.tsv)"
+          cat out/failures.tsv || true
       - name: Upload monitor report
         uses: actions/upload-artifact@v4
         with:
