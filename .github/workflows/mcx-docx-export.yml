@@ -1,0 +1,68 @@
+name: MCX DOCX Export Bridge
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mcx-fetch/manifest.tsv'
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        shell: python
+        run: |
+          import json, os
+          items=[]
+          with open('mcx-fetch/manifest.tsv', encoding='utf-8') as f:
+              for line in f:
+                  if not line.strip():
+                      continue
+                  url, output = line.rstrip('\n').split('\t', 1)
+                  items.append({'url': url, 'output': output})
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write('matrix=' + json.dumps({'include': items}, separators=(',', ':')) + '\n')
+
+  export:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.matrix != '{"include":[]}' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch official 3GPP package
+        id: fetch
+        shell: bash
+        env:
+          SPEC_URL: ${{ matrix.url }}
+          OUTPUT: ${{ matrix.output }}
+        run: |
+          set -euo pipefail
+          ua='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36'
+          mkdir -p work/unpack package
+          base="${SPEC_URL%/*}/"
+          curl -fsSL -A "$ua" -c work/cookies.txt "$base" -o /dev/null || true
+          curl -fL --retry 3 --retry-delay 2 -A "$ua" -e "$base" -b work/cookies.txt -H 'Accept: application/zip,application/octet-stream;q=0.9,*/*;q=0.8' "$SPEC_URL" -o work/spec.zip
+          unzip -q work/spec.zip -d work/unpack
+          src="$(find work/unpack -type f -iname '*.docx' | head -n 1)"
+          test -n "$src"
+          unzip -q "$src" -d package
+          spec="${OUTPUT%%_*}"
+          echo "artifact_name=docx-${spec}" >> "$GITHUB_OUTPUT"
+          echo "file_name=${OUTPUT}.docx" >> "$GITHUB_OUTPUT"
+      - name: Export DOCX package as artifact ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.fetch.outputs.artifact_name }}
+          path: package/**
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 6
